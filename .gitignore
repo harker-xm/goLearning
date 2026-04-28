@@ -1,0 +1,15 @@
+# IDE
+.idea/
+.vscode/
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+
+# Logs
+storage/logs/*.log
+
+# Binary
+blog-service
