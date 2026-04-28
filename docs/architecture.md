@@ -25,13 +25,16 @@ blog-service/
 │   │   ├── article.go                  Article 模型 + ArticleSwagger
 │   │   └── article_tag.go             ArticleTag 关联模型
 │   ├── routers/
-│   │   ├── router.go                   路由注册中心：中间件 + API 分组 + Swagger
+│   │   ├── router.go                   路由注册中心：中间件 + API 分组 + Swagger + 文件上传 + 静态服务
+│   │   ├── api/
+│   │   │   └── upload.go               Upload Handler：文件上传接口
 │   │   └── api/v1/
 │   │       ├── tag.go                  Tag Handler：List/Create/Update/Delete 完整实现
 │   │       └── article.go             Article Handler（空实现，待开发）
 │   └── service/
 │       ├── service.go                  Service 结构体（ctx + dao）+ New 构造函数
 │       ├── tag.go                      Tag 请求结构体 + 5 个业务方法
+│       ├── upload.go                   文件上传业务逻辑（校验 + 存储 + 返回 URL）
 │       └── article.go                 Article 请求结构体（业务方法待实现）
 │
 ├── pkg/                             ← 可复用公共包（理论上可以被其他项目引用）
@@ -44,19 +47,25 @@ blog-service/
 │   ├── errcode/
 │   │   ├── errcode.go                  Error 结构体 + 错误码 → HTTP 状态码映射
 │   │   ├── common_code.go            预定义 9 个通用错误码
-│   │   └── module_code.go            业务模块错误码（标签 5 个）
+│   │   └── module_code.go            业务模块错误码（标签 5 个 + 上传 1 个）
 │   ├── logger/
 │   │   └── logger.go                  JSON 日志组件（6 级日志 + 文件切割）
-│   └── setting/
-│       ├── setting.go                  viper 配置读取
-│       └── section.go                 配置结构体定义 + ReadSection
+│   ├── setting/
+│   │   ├── setting.go                  viper 配置读取
+│   │   └── section.go                 配置结构体定义 + ReadSection
+│   ├── upload/
+│   │   └── file.go                    文件处理工具（校验后缀/大小/权限 + 保存文件）
+│   └── util/
+│       └── md5.go                     MD5 编码工具
 │
 ├── docs/                            ← swag init 自动生成 + 架构文档
 │   ├── docs.go / swagger.json / swagger.yaml
 │   └── architecture.md              本文件
 │
-└── storage/logs/                    ← 日志输出目录
-    └── app.log
+└── storage/                         ← 运行时文件目录
+    ├── logs/                            日志输出
+    │   └── app.log
+    └── uploads/                         上传文件存储
 ```
 
 ---
@@ -136,12 +145,14 @@ func NewRouter() *gin.Engine {
 gin.Engine
 ├── GET 树
 │   ├── /swagger/*any
-│   ├── /api/v1/tags           → [Logger, Recovery, Translations, Tag.List]       ✅ 已实现
-│   ├── /api/v1/articles       → [Logger, Recovery, Translations, Article.List]   🔲 待实现
-│   └── /api/v1/articles/:id   → [Logger, Recovery, Translations, Article.Get]    🔲 待实现
+│   ├── /static/*filepath          → [Logger, Recovery, Translations, StaticFS]     ✅ 静态文件服务
+│   ├── /api/v1/tags               → [Logger, Recovery, Translations, Tag.List]       ✅ 已实现
+│   ├── /api/v1/articles           → [Logger, Recovery, Translations, Article.List]   🔲 待实现
+│   └── /api/v1/articles/:id       → [Logger, Recovery, Translations, Article.Get]    🔲 待实现
 ├── POST 树
-│   ├── /api/v1/tags           → [Logger, Recovery, Translations, Tag.Create]     ✅ 已实现
-│   └── /api/v1/articles       → [Logger, Recovery, Translations, Article.Create] 🔲 待实现
+│   ├── /upload/file               → [Logger, Recovery, Translations, Upload.UploadFile] ✅ 文件上传
+│   ├── /api/v1/tags               → [Logger, Recovery, Translations, Tag.Create]     ✅ 已实现
+│   └── /api/v1/articles           → [Logger, Recovery, Translations, Article.Create] 🔲 待实现
 ├── PUT 树
 │   ├── /api/v1/tags/:id       → [Logger, Recovery, Translations, Tag.Update]     ✅ 已实现
 │   └── /api/v1/articles/:id   → [Logger, Recovery, Translations, Article.Update] 🔲 待实现
@@ -244,6 +255,59 @@ gin.Engine
 
 之后查询时 `WHERE is_del=0` 会自动过滤掉已删除的记录。
 
+### 场景 F：上传图片（POST /upload/file）
+
+```
+客户端: curl -X POST /upload/file -F file=@photo.png -F type=1
+  │
+  │  HTTP 请求体格式: multipart/form-data
+  │  包含两个 part: file(二进制图片) + type("1")
+  │
+  ▼
+Upload.UploadFile handler
+  ├─ c.Request.FormFile("file")
+  │    → file (multipart.File 读取流)
+  │    → fileHeader (元信息: 文件名、大小)
+  ├─ c.PostForm("type") → "1" → FileType(1) = TypeImage
+  │
+  ▼
+svc.UploadFile(TypeImage, file, fileHeader)
+  ├─ GetFileName("photo.png")
+  │    ├─ GetFileExt → ".png"
+  │    ├─ TrimSuffix → "photo"
+  │    ├─ EncodeMD5("photo") → "2c26b46b..."
+  │    └─ 返回 "2c26b46b...png"
+  │
+  ├─ CheckContainExt: ".PNG" ∈ [".JPG",".JPEG",".PNG"] → ✅
+  ├─ CheckMaxSize: 文件大小 < 5MB → ✅
+  ├─ CheckSavePath: storage/uploads 存在? → ✅ (不存在则自动创建)
+  ├─ CheckPermission: 有写权限? → ✅
+  │
+  ├─ SaveFile(fileHeader, "storage/uploads/2c26b46b...png")
+  │    ├─ fileHeader.Open() → src (读取流)
+  │    ├─ os.Create(dst) → out (磁盘文件)
+  │    └─ io.Copy(out, src) → 二进制数据流式写入磁盘
+  │
+  └─ 返回 AccessUrl: http://127.0.0.1:8000/static/2c26b46b...png
+  │
+  ▼
+HTTP 200 {"file_access_url": "http://127.0.0.1:8000/static/2c26b46b...png"}
+```
+
+### 场景 G：访问已上传的文件（GET /static/xxx.png）
+
+```
+GET http://127.0.0.1:8000/static/2c26b46b...png
+  │
+  ▼
+gin.StaticFS("/static", http.Dir("storage/uploads"))
+  ├─ 剥离 URL 前缀 "/static"，得到 "2c26b46b...png"
+  ├─ 拼接磁盘路径: storage/uploads/2c26b46b...png
+  ├─ os.Open 打开文件
+  ├─ 根据扩展名设置 Content-Type: image/png
+  └─ 文件内容写入 HTTP 响应体 → 客户端收到图片
+```
+
 ---
 
 ## 五、分层架构与各层职责
@@ -294,6 +358,8 @@ gin.Engine
 │  pkg/errcode/       错误码定义 + HTTP 状态码映射               │
 │  pkg/app/           统一响应 + 参数校验 + 分页                 │
 │  pkg/convert/       类型转换工具                               │
+│  pkg/upload/        文件上传工具（校验 + 存储）                │
+│  pkg/util/          通用工具（MD5）                            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -377,4 +443,87 @@ MySQL 数据库
 | 20010004 | 删除标签失败 | 500 |
 | 20010005 | 统计标签失败 | 500 |
 
+### 上传业务错误码（module_code.go）
+
+| 错误码 | 含义 | HTTP 状态码 |
+|--------|------|------------|
+| 20030001 | 上传文件失败 | 500 |
+
 ---
+
+## 八、文件上传模块架构
+
+### 上传流程
+
+```
+客户端 POST /upload/file (multipart/form-data)
+  │
+  ├─ file: 二进制文件内容
+  ├─ type: 1 (TypeImage)
+  │
+  ▼
+Upload Handler → Service.UploadFile
+  │
+  ├─ GetFileName: 原始文件名 → MD5加密 + 保留扩展名
+  ├─ CheckContainExt: 后缀白名单校验 (.jpg/.jpeg/.png)
+  ├─ CheckMaxSize: 文件大小校验 (< 5MB)
+  ├─ CheckSavePath + CreateSavePath: 确保目录存在
+  ├─ CheckPermission: 目录写权限校验
+  ├─ SaveFile: io.Copy 流式写入磁盘
+  │
+  └─ 返回 AccessUrl: http://127.0.0.1:8000/static/{md5_name}.png
+```
+
+### 静态文件服务
+
+```
+r.StaticFS("/static", http.Dir("storage/uploads"))
+
+URL: /static/abc123.png  →  磁盘: storage/uploads/abc123.png
+```
+
+Gin 自动处理路径解析、Content-Type 识别、路径穿越防护。
+
+### 配置项（config.yaml App 区段）
+
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| UploadSavePath | storage/uploads | 文件存储目录 |
+| UploadServerUrl | http://127.0.0.1:8000/static | 访问 URL 前缀 |
+| UploadImageMaxSize | 5 | 图片最大 5MB |
+| UploadImageAllowExts | .jpg/.jpeg/.png | 允许的图片后缀 |
+
+---
+
+## 九、目前的完成度
+
+```
+请求完整链路：
+  HTTP 请求 → 中间件 → Handler → Service → DAO → Model → 数据库
+
+  ✅ 标签模块（Tag）— 完整链路已打通
+     创建 / 查询列表 / 更新 / 删除（软删除）全部可用
+
+  ✅ 文件上传模块（Upload）— 已完成
+     图片上传（校验后缀/大小 + MD5 文件名 + 磁盘存储）
+     静态文件服务（通过 /static/ 路径访问已上传文件）
+
+  🔲 文章模块（Article）— 待实现
+     handler 空实现，service/dao/model 方法待补充
+```
+
+### 已验证的测试用例
+
+| 操作 | 请求 | 结果 |
+|------|------|------|
+| 创建标签 | POST /api/v1/tags name=Rust | ✅ 200，数据库写入成功 |
+| 查询列表 | GET /api/v1/tags?state=1 | ✅ 200，返回 list + pager |
+| 更新标签 | PUT /api/v1/tags/1 name=Golang | ✅ 200，name 已更新 |
+| 删除标签 | DELETE /api/v1/tags/1 | ✅ 200，软删除（is_del=1） |
+| 删除后查询 | GET /api/v1/tags?state=1 | ✅ 200，已删除记录不出现 |
+| 参数校验 | GET /api/v1/tags?state=6 | ❌ 400，中文错误提示 |
+| 英文错误 | +Header locale:en | ❌ 400，英文错误提示 |
+| 上传 PNG | POST /upload/file file=@photo.png type=1 | ✅ 200，返回 file_access_url |
+| 上传非法类型 | POST /upload/file file=@test.txt type=1 | ❌ 500，"file suffix is not supported" |
+| 缺少 type | POST /upload/file file=@photo.png | ❌ 400，"入参错误" |
+| 访问文件 | GET /static/xxx.png | ✅ 200，返回图片二进制数据 |

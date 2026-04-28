@@ -35,9 +35,13 @@ blog-service/
 │   ├── convert/            类型转换工具
 │   ├── errcode/            错误码定义
 │   ├── logger/             日志组件
-│   └── setting/            配置读取
+│   ├── setting/            配置读取
+│   ├── upload/             文件上传工具（校验 + 存储）
+│   └── util/               通用工具（MD5）
 ├── docs/                   Swagger 文档 + 架构说明
-└── storage/logs/           日志输出目录
+└── storage/
+    ├── logs/               日志输出目录
+    └── uploads/            上传文件存储目录
 ```
 
 ## 快速开始
@@ -159,6 +163,13 @@ curl http://127.0.0.1:8000/api/v1/tags?state=1
 | PUT | `/api/v1/articles/:id` | 更新文章 | 🔲 |
 | DELETE | `/api/v1/articles/:id` | 删除文章 | 🔲 |
 
+### 文件上传
+
+| 方法 | 路径 | 说明 | 状态 |
+|------|------|------|------|
+| POST | `/upload/file` | 上传文件（图片） | ✅ |
+| GET | `/static/*filepath` | 访问已上传的文件 | ✅ |
+
 ## 请求/响应示例
 
 ### 创建标签
@@ -211,6 +222,21 @@ curl http://127.0.0.1:8000/api/v1/tags?state=6
   "details": ["State必须是[0 1]中的一个"]
 }
 ```
+
+### 上传图片
+
+```bash
+curl -X POST http://127.0.0.1:8000/upload/file \
+  -F file=@photo.png -F type=1
+```
+
+```json
+{
+  "file_access_url": "http://127.0.0.1:8000/static/2c26b46b68ffc68ff99b453c1d304134.png"
+}
+```
+
+上传后可通过返回的 URL 直接访问文件。支持 `.jpg`、`.jpeg`、`.png`，单文件最大 5MB。
 
 ## 架构说明
 
