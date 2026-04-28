@@ -13,6 +13,7 @@
 | 日志 | 自定义 JSON Logger + [Lumberjack](https://github.com/natefinch/lumberjack) | - |
 | API 文档 | [Swagger](https://github.com/swaggo/gin-swagger)                        | v1.2.0 |
 | 参数校验 | [Validator](https://github.com/go-playground/validator) (Gin 内置)        | v10 |
+| 鉴权 | [JWT](https://github.com/dgrijalva/jwt-go)                               | v3.2.0 |
 | 数据库 | MySQL                                                                   | 8.0+ |
 | 语言 | Go                                                                      | 1.23+ |
 
@@ -106,6 +107,23 @@ CREATE TABLE `blog_article_tag` (
   `is_del` tinyint(3) unsigned DEFAULT '0' COMMENT '是否删除 0 为未删除、1 为已删除',
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文章标签关联';
+
+CREATE TABLE `blog_auth` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `app_key` varchar(20) DEFAULT '' COMMENT 'Key',
+  `app_secret` varchar(50) DEFAULT '' COMMENT 'Secret',
+  `created_on` int(10) unsigned DEFAULT 0,
+  `created_by` varchar(100) DEFAULT '',
+  `modified_on` int(10) unsigned DEFAULT 0,
+  `modified_by` varchar(100) DEFAULT '',
+  `deleted_on` int(10) unsigned DEFAULT 0,
+  `is_del` tinyint(1) unsigned DEFAULT 0,
+  PRIMARY KEY (`id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='认证管理';
+
+-- 插入测试认证数据
+INSERT INTO `blog_auth`(`app_key`, `app_secret`, `created_on`, `created_by`, `is_del`)
+VALUES ('eddycjy', 'go-programming-tour-book', 0, 'eddycjy', 0);
 ```
 
 ### 3. 修改配置
@@ -132,17 +150,26 @@ go run main.go
 ### 5. 验证
 
 ```bash
-# 创建标签
-curl -X POST http://127.0.0.1:8000/api/v1/tags \
-  -F 'name=Go' -F 'created_by=test' -F 'state=1'
+# 获取 JWT token
+curl -X POST http://127.0.0.1:8000/auth \
+  -F app_key=eddycjy -F app_secret=go-programming-tour-book
+# 返回 {"token": "eyJhbG..."}
 
-# 查询标签列表
-curl http://127.0.0.1:8000/api/v1/tags?state=1
+# 用 token 访问 API（替换 <TOKEN> 为上一步拿到的值）
+curl 'http://127.0.0.1:8000/api/v1/tags?state=1&token=<TOKEN>'
 ```
 
 ## API 接口
 
 启动服务后访问 Swagger 文档：http://localhost:8000/swagger/index.html
+
+> `/api/v1/` 下的所有接口需要 JWT token 鉴权，通过 `/auth` 获取 token 后，在 Query 参数 `?token=xxx` 或 Header `token: xxx` 中携带。
+
+### 认证
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|------|
+| POST | `/auth` | 获取 JWT token | 无需 |
 
 ### 标签管理
 
@@ -172,7 +199,20 @@ curl http://127.0.0.1:8000/api/v1/tags?state=1
 
 ## 请求/响应示例
 
-### 创建标签
+### 获取 token
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth \
+  -F app_key=eddycjy -F app_secret=go-programming-tour-book
+```
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+### 创建标签（需带 token）
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/tags \
@@ -256,6 +296,9 @@ curl -X POST http://127.0.0.1:8000/upload/file \
                                                       │
                                                       ▼
                                                     MySQL
+
+/api/v1/* 路由额外经过 JWT 中间件:
+请求 → Logger → Recovery → Translations → JWT → Handler → ...
 ```
 
 ## 学习参考

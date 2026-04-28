@@ -7,26 +7,30 @@ blog-service/
 │
 ├── main.go                          ← 程序入口：init() 初始化 + main() 启动服务
 ├── configs/
-│   └── config.yaml                  ← 唯一配置文件：Server/App/Database 三个区段
+│   └── config.yaml                  ← 唯一配置文件：Server/App/Database/JWT 四个区段
 │
 ├── global/                          ← 全局变量仓库（各模块都从这里读取）
-│   ├── setting.go                      ServerSetting / AppSetting / DatabaseSetting / Logger
+│   ├── setting.go                      ServerSetting / AppSetting / DatabaseSetting / JWTSetting / Logger
 │   └── db.go                           DBEngine（gorm 数据库连接）
 │
 ├── internal/                        ← 内部业务代码（不对外暴露）
 │   ├── dao/
 │   │   ├── dao.go                      Dao 结构体（封装 *gorm.DB）+ New 构造函数
-│   │   └── tag.go                      Tag 数据访问：CountTag/GetTagList/CreateTag/UpdateTag/DeleteTag
+│   │   ├── tag.go                      Tag 数据访问：CountTag/GetTagList/CreateTag/UpdateTag/DeleteTag
+│   │   └── auth.go                     Auth 数据访问：GetAuth
 │   ├── middleware/
-│   │   └── translations.go             翻译中间件：把 validator 错误信息翻译成中文
+│   │   ├── translations.go             翻译中间件：把 validator 错误信息翻译成中文
+│   │   └── jwt.go                      JWT 鉴权中间件：从 Header/Query 取 token 并验证
 │   ├── model/
 │   │   ├── model.go                    公共 Model 结构体 + NewDBEngine + 3 个 gorm 回调（时间戳/软删除）
 │   │   ├── tag.go                      Tag 模型 + 5 个 CRUD 方法 + TagSwagger
+│   │   ├── auth.go                     Auth 模型 + Get 方法
 │   │   ├── article.go                  Article 模型 + ArticleSwagger
 │   │   └── article_tag.go             ArticleTag 关联模型
 │   ├── routers/
-│   │   ├── router.go                   路由注册中心：中间件 + API 分组 + Swagger + 文件上传 + 静态服务
+│   │   ├── router.go                   路由注册中心：中间件 + API 分组 + JWT + Swagger + 上传 + 静态服务
 │   │   ├── api/
+│   │   │   ├── auth.go                 Auth Handler：获取 JWT token
 │   │   │   └── upload.go               Upload Handler：文件上传接口
 │   │   └── api/v1/
 │   │       ├── tag.go                  Tag Handler：List/Create/Update/Delete 完整实现
@@ -34,12 +38,14 @@ blog-service/
 │   └── service/
 │       ├── service.go                  Service 结构体（ctx + dao）+ New 构造函数
 │       ├── tag.go                      Tag 请求结构体 + 5 个业务方法
+│       ├── auth.go                     Auth 请求结构体 + CheckAuth 方法
 │       ├── upload.go                   文件上传业务逻辑（校验 + 存储 + 返回 URL）
 │       └── article.go                 Article 请求结构体（业务方法待实现）
 │
 ├── pkg/                             ← 可复用公共包（理论上可以被其他项目引用）
 │   ├── app/
 │   │   ├── app.go                      统一响应封装（ToResponse/ToResponseList/ToErrorResponse）
+│   │   ├── jwt.go                      JWT 工具（GenerateToken / ParseToken）
 │   │   ├── form.go                     BindAndValid 参数绑定+校验+翻译
 │   │   └── pagination.go              分页工具（GetPage/GetPageSize/GetPageOffset）
 │   ├── convert/
@@ -93,7 +99,9 @@ $ go run main.go
          │  ReadSection("Server", ...)   → global.ServerSetting
          │  ReadSection("App", ...)      → global.AppSetting
          │  ReadSection("Database", ...) → global.DatabaseSetting
+         │  ReadSection("JWT", ...)      → global.JWTSetting
          │  ReadTimeout *= time.Second   (60 → 60秒)
+         │  JWTSetting.Expire *= time.Second (7200 → 7200秒)
          │
     ②    setupLogger()
          │  lumberjack.Logger{ Filename: "storage/logs/app.log", MaxSize: 600MB, MaxAge: 10天 }
@@ -125,12 +133,19 @@ $ go run main.go
 ```go
 func NewRouter() *gin.Engine {
     r := gin.New()                    // 空引擎
-    r.Use(gin.Logger())               // 中间件1：请求日志
-    r.Use(gin.Recovery())             // 中间件2：panic 捕获
-    r.Use(middleware.Translations())  // 中间件3：初始化翻译器
+    r.Use(gin.Logger())               // 全局中间件1：请求日志
+    r.Use(gin.Recovery())             // 全局中间件2：panic 捕获
+    r.Use(middleware.Translations())  // 全局中间件3：初始化翻译器
     r.GET("/swagger/*any", ...)       // Swagger 文档路由
 
-    apiv1 := r.Group("/api/v1")       // API v1 路由组
+    // 公开路由（无需鉴权）
+    r.POST("/auth", api.GetAuth)      // 获取 JWT token
+    r.POST("/upload/file", ...)       // 文件上传
+    r.StaticFS("/static", ...)        // 静态文件服务
+
+    // 受保护路由（需要 JWT token）
+    apiv1 := r.Group("/api/v1")
+    apiv1.Use(middleware.JWT())       // 分组中间件：JWT 鉴权
     {
         // 标签 5 条路由（CRUD 已完整实现）
         // 文章 6 条路由（handler 待实现）
@@ -144,15 +159,16 @@ func NewRouter() *gin.Engine {
 ```
 gin.Engine
 ├── GET 树
-│   ├── /swagger/*any
-│   ├── /static/*filepath          → [Logger, Recovery, Translations, StaticFS]     ✅ 静态文件服务
-│   ├── /api/v1/tags               → [Logger, Recovery, Translations, Tag.List]       ✅ 已实现
-│   ├── /api/v1/articles           → [Logger, Recovery, Translations, Article.List]   🔲 待实现
-│   └── /api/v1/articles/:id       → [Logger, Recovery, Translations, Article.Get]    🔲 待实现
+│   ├── /swagger/*any                                                              (4 handlers)
+│   ├── /static/*filepath          → [Logger, Recovery, Translations, StaticFS]     (4 handlers)
+│   ├── /api/v1/tags               → [Logger, Recovery, Translations, JWT, Tag.List]       (5 handlers) ✅
+│   ├── /api/v1/articles           → [Logger, Recovery, Translations, JWT, Article.List]   (5 handlers) 🔲
+│   └── /api/v1/articles/:id       → [Logger, Recovery, Translations, JWT, Article.Get]    (5 handlers) 🔲
 ├── POST 树
-│   ├── /upload/file               → [Logger, Recovery, Translations, Upload.UploadFile] ✅ 文件上传
-│   ├── /api/v1/tags               → [Logger, Recovery, Translations, Tag.Create]     ✅ 已实现
-│   └── /api/v1/articles           → [Logger, Recovery, Translations, Article.Create] 🔲 待实现
+│   ├── /auth                      → [Logger, Recovery, Translations, GetAuth]      (4 handlers) ✅ 公开
+│   ├── /upload/file               → [Logger, Recovery, Translations, UploadFile]   (4 handlers) ✅ 公开
+│   ├── /api/v1/tags               → [Logger, Recovery, Translations, JWT, Tag.Create]     (5 handlers) ✅
+│   └── /api/v1/articles           → [Logger, Recovery, Translations, JWT, Article.Create] (5 handlers) 🔲
 ├── PUT 树
 │   ├── /api/v1/tags/:id       → [Logger, Recovery, Translations, Tag.Update]     ✅ 已实现
 │   └── /api/v1/articles/:id   → [Logger, Recovery, Translations, Article.Update] 🔲 待实现
@@ -495,7 +511,81 @@ Gin 自动处理路径解析、Content-Type 识别、路径穿越防护。
 
 ---
 
-## 九、目前的完成度
+## 九、JWT 鉴权模块架构
+
+### JWT 原理
+
+JWT (JSON Web Token) 由三部分组成，以 `.` 分隔：
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJhcHBfa2V5IjoiMjc1NjY4YmE2NTUwNDljZDczOWQxZDllNmIzMWNjZjEiLCJleHAiOjE3NDU4NDMyMDF9.xxxxx
+└──── Header ────┘ └──────────────── Payload ──────────────────────────────────────────────┘ └ Signature ┘
+
+Header:    {"alg": "HS256", "typ": "JWT"}       算法信息
+Payload:   {"app_key": "md5...", "exp": 1745843201, "iss": "blog-service"}  数据载荷
+Signature: HMACSHA256(base64(header) + "." + base64(payload), secret)       签名
+```
+
+### 鉴权流程
+
+```
+第一次：获取 token（公开路由，不需要鉴权）
+  POST /auth  app_key=eddycjy & app_secret=go-programming-tour-book
+    │
+    ├─ BindAndValid 校验参数
+    ├─ svc.CheckAuth → dao.GetAuth → SELECT FROM blog_auth WHERE app_key=? AND app_secret=?
+    │    └─ 找到记录（ID > 0）→ 验证通过
+    ├─ app.GenerateToken(appKey, appSecret)
+    │    ├─ MD5(appKey), MD5(appSecret) 写入 Claims
+    │    ├─ 设置过期时间 = now + 7200秒
+    │    ├─ jwt.NewWithClaims(HS256, claims)
+    │    └─ SignedString(secret) → 生成 token 字符串
+    └─ 返回 {"token": "eyJhbG..."}
+
+后续请求：携带 token（受保护路由）
+  GET /api/v1/tags?state=1&token=eyJhbG...
+    │
+    ▼
+  JWT 中间件
+    ├─ 从 Query 参数或 Header 中取 token
+    ├─ app.ParseToken(token)
+    │    ├─ jwt.ParseWithClaims 解析 + 验证签名
+    │    ├─ 检查是否过期（exp < now?）
+    │    └─ 返回 Claims 或 error
+    ├─ token 为空     → errcode.InvalidParams (400)
+    ├─ token 已过期   → errcode.UnauthorizedTokenTimeout (401)
+    ├─ token 格式错误 → errcode.UnauthorizedTokenError (401)
+    ├─ 验证通过       → c.Next() 放行
+    │
+    ▼
+  Tag.List handler（正常执行业务逻辑）
+```
+
+### 路由鉴权分区
+
+```
+公开路由（4 handlers: Logger → Recovery → Translations → Handler）
+  POST /auth              获取 token
+  POST /upload/file       文件上传
+  GET  /static/*filepath  静态文件
+  GET  /swagger/*any      API 文档
+
+受保护路由（5 handlers: Logger → Recovery → Translations → JWT → Handler）
+  /api/v1/tags/*          标签 CRUD
+  /api/v1/articles/*      文章 CRUD
+```
+
+### 配置项（config.yaml JWT 区段）
+
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| Secret | eddycjy | 签名密钥 |
+| Issuer | blog-service | 签发者标识 |
+| Expire | 7200 | token 有效期（秒），即 2 小时 |
+
+---
+
+## 十、目前的完成度
 
 ```
 请求完整链路：
@@ -508,6 +598,10 @@ Gin 自动处理路径解析、Content-Type 识别、路径穿越防护。
      图片上传（校验后缀/大小 + MD5 文件名 + 磁盘存储）
      静态文件服务（通过 /static/ 路径访问已上传文件）
 
+  ✅ JWT 鉴权模块（Auth）— 已完成
+     /auth 获取 token + JWT 中间件保护 /api/v1/* 路由
+     支持 Query 参数和 Header 两种传 token 方式
+
   🔲 文章模块（Article）— 待实现
      handler 空实现，service/dao/model 方法待补充
 ```
@@ -516,14 +610,20 @@ Gin 自动处理路径解析、Content-Type 识别、路径穿越防护。
 
 | 操作 | 请求 | 结果 |
 |------|------|------|
-| 创建标签 | POST /api/v1/tags name=Rust | ✅ 200，数据库写入成功 |
-| 查询列表 | GET /api/v1/tags?state=1 | ✅ 200，返回 list + pager |
-| 更新标签 | PUT /api/v1/tags/1 name=Golang | ✅ 200，name 已更新 |
-| 删除标签 | DELETE /api/v1/tags/1 | ✅ 200，软删除（is_del=1） |
-| 删除后查询 | GET /api/v1/tags?state=1 | ✅ 200，已删除记录不出现 |
-| 参数校验 | GET /api/v1/tags?state=6 | ❌ 400，中文错误提示 |
-| 英文错误 | +Header locale:en | ❌ 400，英文错误提示 |
+| 创建标签 | POST /api/v1/tags name=Rust (+token) | ✅ 200，数据库写入成功 |
+| 查询列表 | GET /api/v1/tags?state=1 (+token) | ✅ 200，返回 list + pager |
+| 更新标签 | PUT /api/v1/tags/1 name=Golang (+token) | ✅ 200，name 已更新 |
+| 删除标签 | DELETE /api/v1/tags/1 (+token) | ✅ 200，软删除（is_del=1） |
+| 删除后查询 | GET /api/v1/tags?state=1 (+token) | ✅ 200，已删除记录不出现 |
+| 参数校验 | GET /api/v1/tags?state=6 (+token) | ❌ 400，中文错误提示 |
+| 英文错误 | +Header locale:en (+token) | ❌ 400，英文错误提示 |
 | 上传 PNG | POST /upload/file file=@photo.png type=1 | ✅ 200，返回 file_access_url |
 | 上传非法类型 | POST /upload/file file=@test.txt type=1 | ❌ 500，"file suffix is not supported" |
-| 缺少 type | POST /upload/file file=@photo.png | ❌ 400，"入参错误" |
 | 访问文件 | GET /static/xxx.png | ✅ 200，返回图片二进制数据 |
+| 正确凭证获取 token | POST /auth app_key+app_secret | ✅ 200，返回 JWT token |
+| 错误凭证获取 token | POST /auth wrong credentials | ❌ 401，"鉴权失败，找不到对应的 AppKey 和 AppSecret" |
+| 不带 token 访问 API | GET /api/v1/tags?state=1 | ❌ 400，"入参错误" |
+| 带错误 token | GET /api/v1/tags?token=invalid | ❌ 401，"鉴权失败，Token 错误" |
+| Query 传 token | GET /api/v1/tags?state=1&token=eyJ... | ✅ 200，正常返回 |
+| Header 传 token | GET /api/v1/tags + Header token:eyJ... | ✅ 200，正常返回 |
+| 公开路由不受影响 | GET /swagger/index.html | ✅ 200，无需 token |
