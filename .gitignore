@@ -4,6 +4,9 @@
 
 # Claude
 .claude/
+.codebuddy/
+docs/
+openspec/
 
 # OS
 .DS_Store
