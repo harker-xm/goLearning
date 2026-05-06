@@ -8,6 +8,8 @@ import (
 	"log"
 	"runtime"
 	"time"
+
+	"github.com/go-programming-tour-book/blog-service/pkg/tracing"
 )
 
 type Level int8
@@ -105,7 +107,7 @@ func (l *Logger) WithCallersFrames() *Logger {
 }
 
 func (l *Logger) JSONFormat(level Level, message string) map[string]interface{} {
-	data := make(Fields, len(l.fields)+4)
+	data := make(Fields, len(l.fields)+5)
 	data["level"] = level.String()
 	data["time"] = time.Now().Local().UnixNano()
 	data["message"] = message
@@ -115,6 +117,11 @@ func (l *Logger) JSONFormat(level Level, message string) map[string]interface{} 
 			if _, ok := data[k]; !ok {
 				data[k] = v
 			}
+		}
+	}
+	if l.ctx != nil {
+		if traceID := tracing.GetTraceID(l.ctx); traceID != "" {
+			data["trace_id"] = traceID
 		}
 	}
 

@@ -36,9 +36,11 @@ func NewRouter() *gin.Engine {
 	r := gin.New()
 
 	if global.ServerSetting.RunMode == "debug" {
+		r.Use(middleware.TraceID())
 		r.Use(gin.Logger())
 		r.Use(gin.Recovery())
 	} else {
+		r.Use(middleware.TraceID())
 		r.Use(middleware.AccessLog())
 		r.Use(middleware.Recovery())
 	}

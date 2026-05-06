@@ -7,6 +7,8 @@
 .codebuddy/
 docs/
 openspec/
+.openspec-process.txt
+.openspec-state.yaml
 
 # OS
 .DS_Store
